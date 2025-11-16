@@ -30,7 +30,7 @@ GO_PKG_LDFLAGS_X:= \
 
 GO_PKG_TAGS:=trace
 GO_PKG_TARGET_VARS:=$(filter-out CGO_ENABLED=%,$(GO_PKG_TARGET_VARS)) \
-	CGO_ENABLED=0 \
+	CGO_ENABLED=1 \
 	GOEXPERIMENT=greenteagc
 
 GO_PKG_DEFAULT_LDFLAGS:=-w -s -extldflags "-static"
