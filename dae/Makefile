@@ -26,7 +26,9 @@ GO_PKG:=github.com/daeuniverse/dae
 GO_PKG_EXCLUDES:=control/kern/tests
 GO_PKG_LDFLAGS_X:= \
 	$(GO_PKG)/cmd.Version=$(PKG_VERSION) \
-	$(GO_PKG)/common/consts.MaxMatchSetLen_=1024
+	$(GO_PKG)/common/consts.MaxMatchSetLen_=1024 \
+	-extldflags "-static"
+
 GO_PKG_TAGS:=trace
 GO_PKG_TARGET_VARS:=$(filter-out CGO_ENABLED=%,$(GO_PKG_TARGET_VARS)) \
 	CGO_ENABLED=0 \
