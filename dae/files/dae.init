@@ -117,9 +117,9 @@ start_service() {
     [ "$enabled" -eq "1" ] || return 1
 
     config_get config_file "config" "config_file" "/etc/dae/config.dae"
-    "$PROG" validate -c "$config_file" || return 1
 
     set_chmod_640
+    "$PROG" validate -c "$config_file" || return 1
     update_cron "add"
     hijack_resolv_conf
 	cleanup_netns
