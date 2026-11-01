@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - kix
+    paths:
+      - 'dae/**'
+      - 'luci-app-dae/**'
 
 
 permissions:
