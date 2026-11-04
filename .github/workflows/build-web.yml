@@ -14,7 +14,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@main
+      # 由 @main（可变分支头）改为 @v4 tag，引用更稳定
+      - uses: actions/setup-node@v4
         with:
           node-version: 18
 
@@ -29,42 +30,61 @@ jobs:
           sudo npm i taze -g
 
       - name: Update Makefile
+        env:
+          # 用 GITHUB_TOKEN 给 API 请求加认证，避免匿名限流（60 次/小时/IP）
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           chmod 755 ./dae/files/dae.init
           find ./ -type f -exec dos2unix {} \; -print
-          latest_commit="$(curl -s https://api.github.com/repos/ppdragon16/dae/commits/next | jq -r '.sha' | cut -b 1-7)"
-          latest_commit_full="$(curl -s https://api.github.com/repos/ppdragon16/dae/commits/next | jq -r '.sha')"
-          latest_core_date="$(curl -s https://api.github.com/repos/ppdragon16/dae/commits/next | jq -r '.commit.committer.date | split("T")[0] | split("-") | "\(.[0]).\(.[1]).\(.[2])"')"
-          timestamp=$(curl -s https://api.github.com/repos/ppdragon16/dae/commits/next | jq -r '.commit.author.date')
+          # 4 次 curl 合并为 1 次，认证 + 减少请求数
+          commit_info="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/ppdragon16/dae/commits/next)"
+          latest_commit_full="$(echo "$commit_info" | jq -r '.sha')"
+          latest_commit="$(echo "$commit_info" | jq -r '.sha' | cut -b 1-7)"
+          latest_core_date="$(echo "$commit_info" | jq -r '.commit.committer.date | split("T")[0] | split("-") | "\(.[0]).\(.[1]).\(.[2])"')"
+          timestamp="$(echo "$commit_info" | jq -r '.commit.author.date')"
           formatted_timestamp=$(date --date="$timestamp" "+%Y-%m-%d")
+          # 上游接口异常时直接报错终止，避免把空值写进 Makefile
+          if [ -z "$latest_commit_full" ] || [ "$latest_commit_full" = "null" ]; then
+            echo "::error::Failed to fetch latest commit from ppdragon16/dae (possible rate limit or repo change)"
+            exit 1
+          fi
           sed -i '/PKG_VERSION:/d' ./dae/Makefile
           sed -i "7 a PKG_VERSION:=$latest_core_date" ./dae/Makefile
           sed -i '/PKG_SOURCE_VERSION:/d' ./dae/Makefile
           sed -i "12 a PKG_SOURCE_VERSION:=$latest_commit_full" ./dae/Makefile
           echo "version=$formatted_timestamp-$latest_commit" >> "$GITHUB_ENV"
+        # 关键步骤不再 continue-on-error，失败时能在日志里直接看到原因
 
       - name: Commit file
         run: |
           rm -rf build
           git config --global user.email simonsqiu@foxmail.com
           git config --global user.name SimonsQiu
-          git add .
-          git commit -m "Update `date +%Y/%m/%d\ %H:%M:%S\ %Z`" -a
-        continue-on-error: true
+          # 没有实际变更时跳过 commit，避免空提交报错
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "Nothing to commit, upstream has no new changes."
+            echo "has_changes=false" >> "$GITHUB_ENV"
+          else
+            git add .
+            git commit -m "Update `date +%Y/%m/%d\ %H:%M:%S\ %Z`" -a
+            echo "has_changes=true" >> "$GITHUB_ENV"
+          fi
 
       - name: Push changes
+        if: env.has_changes == 'true'
         uses: ad-m/github-push-action@master
         with:
-          github_token: ${{secrets.ACTIONS_DEPLOY_KEY}}
+          github_token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
           branch: ppdragon16
-        continue-on-error: true
+        # 关键步骤不再 continue-on-error，token 失效时能直接暴露问题
 
       - name: Cleanup Workflow Logs
         uses: Mattraks/delete-workflow-runs@main
         with:
-          token: ${{secrets.ACTIONS_DEPLOY_KEY}}
+          token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
           repository: ${{ github.repository }}
-          retain_days: 1
+          retain_days: 3
         continue-on-error: true
 
       - name: Delete Older Releases
@@ -73,20 +93,13 @@ jobs:
           keep_latest: 3
           delete_tags: true
         env:
-          GITHUB_TOKEN: ${{secrets.ACTIONS_DEPLOY_KEY}}
+          GITHUB_TOKEN: ${{ secrets.ACTIONS_DEPLOY_KEY }}
         continue-on-error: true
 
+      # 由 @master 改为 @v1 tag，解决 "unable to find version master" 的解析报错
       - name: Cleanup Old Action Artifacts
-        uses: c-hive/gha-remove-artifacts@master
+        uses: c-hive/gha-remove-artifacts@v1
         with:
           age: '3 days'
           skip-recent: 3
-        continue-on-error: true
-
-      - name: Cleanup Workflow Logs
-        uses: Mattraks/delete-workflow-runs@main
-        with:
-          token: ${{secrets.ACTIONS_DEPLOY_KEY}}
-          repository: ${{ github.repository }}
-          retain_days: 3
         continue-on-error: true
