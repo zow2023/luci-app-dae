@@ -75,7 +75,7 @@ jobs:
         if: env.has_changes == 'true'
         uses: ad-m/github-push-action@master
         with:
-          github_token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           branch: ppdragon16
         # 关键步骤不再 continue-on-error，token 失效时能直接暴露问题
 
