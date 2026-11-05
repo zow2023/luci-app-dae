@@ -70,7 +70,7 @@ jobs:
         if: env.has_changes == 'true'
         uses: ad-m/github-push-action@v0.8.0
         with:
-          github_token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           branch: next
           force: true
 
