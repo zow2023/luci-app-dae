@@ -3,7 +3,7 @@ name: Build Web
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 16 * * *
+    - cron: '0 16 * * *'
 
 jobs:
   build:
@@ -15,42 +15,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@main
+      - uses: actions/setup-node@v4
         with:
           node-version: 18
+
+      - name: Enable Corepack for pnpm
+        run: corepack enable
 
       - name: Build System Setup
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools jq
-          sudo apt-get install -y dos2unix
-          sudo npm install -g pnpm
+          sudo apt-get install -y squashfs-tools jq dos2unix
           sudo npm i taze -g
 
       - name: Update Makefile
         run: |
           chmod 755 ./dae/files/dae.init
           find ./ -type f -exec dos2unix {} \; -print
-          latest_commit="$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next | jq -r '.sha' | cut -b 1-7)"
-          latest_commit_full="$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next | jq -r '.sha')"
-          latest_core_date="$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next | jq -r '.commit.committer.date | split("T")[0] | split("-") | "\(.[0]).\(.[1]).\(.[2])"')"
-          timestamp=$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next | jq -r '.commit.author.date')
-          formatted_timestamp=$(date --date="$timestamp" "+%Y-%m-%d")
-          sed -i '/PKG_VERSION:/d' ./dae/Makefile
-          sed -i "7 a PKG_VERSION:=$latest_core_date" ./dae/Makefile
-          sed -i '/PKG_SOURCE_VERSION:/d' ./dae/Makefile
-          sed -i "12 a PKG_SOURCE_VERSION:=$latest_commit_full" ./dae/Makefile
+
+          # Fetch commit data ONCE to avoid redundant API requests & rate limits
+          api_response="$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next)"
+          latest_commit_full="$(echo "$api_response" | jq -r '.sha')"
+          latest_commit="${latest_commit_full:0:7}"
+          
+          committer_date="$(echo "$api_response" | jq -r '.commit.committer.date')"
+          latest_core_date="$(echo "$committer_date" | cut -d'T' -f1 | tr '-' '.')"
+          
+          author_date="$(echo "$api_response" | jq -r '.commit.author.date')"
+          formatted_timestamp="$(date --date="$author_date" "+%Y-%m-%d")"
+
+          # Use robust regex replacement instead of brittle line numbers
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$latest_core_date/" ./dae/Makefile
+          sed -i "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$latest_commit_full/" ./dae/Makefile
+
           echo "version=$formatted_timestamp-$latest_commit" >> "$GITHUB_ENV"
 
       - name: Commit file
         run: |
           rm -rf build
-          git config --global user.email simonsqiu@foxmail.com
-          git config --global user.name SimonsQiu
+          git config --global user.email "simonsqiu@foxmail.com"
+          git config --global user.name "SimonsQiu"
           git add -A
-
           if git diff --cached --quiet; then
             echo "No changes to commit."
             echo "has_changes=false" >> "$GITHUB_ENV"
@@ -61,40 +68,32 @@ jobs:
 
       - name: Push changes
         if: env.has_changes == 'true'
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@v0.8.0
         with:
           github_token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
           branch: next
           force: true
 
       - name: Cleanup Workflow Logs
-        uses: Mattraks/delete-workflow-runs@main
+        uses: Mattraks/delete-workflow-runs@v2
         with:
-          token: ${{secrets.ACTIONS_DEPLOY_KEY}}
+          token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
           repository: ${{ github.repository }}
-          retain_days: 1
+          retain_days: 3
         continue-on-error: true
 
       - name: Delete Older Releases
-        uses: dev-drprasad/delete-older-releases@master
+        uses: dev-drprasad/delete-older-releases@v0.3.3
         with:
           keep_latest: 3
           delete_tags: true
         env:
-          GITHUB_TOKEN: ${{secrets.ACTIONS_DEPLOY_KEY}}
+          GITHUB_TOKEN: ${{ secrets.ACTIONS_DEPLOY_KEY }}
         continue-on-error: true
 
       - name: Cleanup Old Action Artifacts
-        uses: c-hive/gha-remove-artifacts@master
+        uses: c-hive/gha-remove-artifacts@v1
         with:
           age: '3 days'
           skip-recent: 3
-        continue-on-error: true
-
-      - name: Cleanup Workflow Logs
-        uses: Mattraks/delete-workflow-runs@main
-        with:
-          token: ${{secrets.ACTIONS_DEPLOY_KEY}}
-          repository: ${{ github.repository }}
-          retain_days: 3
         continue-on-error: true
