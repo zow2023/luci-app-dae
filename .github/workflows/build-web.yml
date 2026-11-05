@@ -3,19 +3,24 @@ name: Build Web
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 16 * * *
+    - cron: '0 16 * * *'
+
+# GITHUB_TOKEN 所需权限
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # 由 @main（可变分支头）改为 @v4 tag，引用更稳定
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 18
 
@@ -24,79 +29,110 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools jq
-          sudo apt-get install -y dos2unix
+          sudo apt-get install -y squashfs-tools jq dos2unix
           sudo npm install -g pnpm
-          sudo npm i taze -g
+          sudo npm install -g taze
 
       - name: Update Makefile
         env:
-          # 用 GITHUB_TOKEN 给 API 请求加认证，避免匿名限流（60 次/小时/IP）
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           chmod 755 ./dae/files/dae.init
           find ./ -type f -exec dos2unix {} \; -print
-          # 4 次 curl 合并为 1 次，认证 + 减少请求数
-          commit_info="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+
+          # 获取上游提交信息
+          commit_info="$(curl -fsSL --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/ppdragon16/dae/commits/next)"
-          latest_commit_full="$(echo "$commit_info" | jq -r '.sha')"
-          latest_commit="$(echo "$commit_info" | jq -r '.sha' | cut -b 1-7)"
-          latest_core_date="$(echo "$commit_info" | jq -r '.commit.committer.date | split("T")[0] | split("-") | "\(.[0]).\(.[1]).\(.[2])"')"
-          timestamp="$(echo "$commit_info" | jq -r '.commit.author.date')"
-          formatted_timestamp=$(date --date="$timestamp" "+%Y-%m-%d")
-          # 上游接口异常时直接报错终止，避免把空值写进 Makefile
-          if [ -z "$latest_commit_full" ] || [ "$latest_commit_full" = "null" ]; then
-            echo "::error::Failed to fetch latest commit from ppdragon16/dae (possible rate limit or repo change)"
-            exit 1
-          fi
+
+          latest_commit_full="$(jq -er '.sha | select(test("^[a-f0-9]{40}$"))' <<< "$commit_info")"
+          latest_commit="${latest_commit_full:0:7}"
+
+          committer_date="$(jq -er '.commit.committer.date' <<< "$commit_info")"
+          latest_core_date="$(date --date="$committer_date" '+%Y.%m.%d')"
+
+          author_date="$(jq -er '.commit.author.date' <<< "$commit_info")"
+          formatted_timestamp="$(date --date="$author_date" '+%Y-%m-%d')"
+
+          # 更新 Makefile
           sed -i '/PKG_VERSION:/d' ./dae/Makefile
           sed -i "7 a PKG_VERSION:=$latest_core_date" ./dae/Makefile
+
           sed -i '/PKG_SOURCE_VERSION:/d' ./dae/Makefile
           sed -i "12 a PKG_SOURCE_VERSION:=$latest_commit_full" ./dae/Makefile
+
           echo "version=$formatted_timestamp-$latest_commit" >> "$GITHUB_ENV"
-        # 关键步骤不再 continue-on-error，失败时能在日志里直接看到原因
 
       - name: Commit file
         run: |
+          set -e
+
           rm -rf build
-          git config --global user.email simonsqiu@foxmail.com
-          git config --global user.name SimonsQiu
-          # 没有实际变更时跳过 commit，避免空提交报错
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "Nothing to commit, upstream has no new changes."
+
+          git config user.email "simonsqiu@foxmail.com"
+          git config user.name "SimonsQiu"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
             echo "has_changes=false" >> "$GITHUB_ENV"
           else
-            git add .
-            git commit -m "Update `date +%Y/%m/%d\ %H:%M:%S\ %Z`" -a
+            git commit -m "Update $(date '+%Y/%m/%d %H:%M:%S %Z')"
             echo "has_changes=true" >> "$GITHUB_ENV"
           fi
 
       - name: Push changes
         if: env.has_changes == 'true'
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ppdragon16
-        # 关键步骤不再 continue-on-error，token 失效时能直接暴露问题
-
-      - name: Cleanup Workflow Logs
-        uses: Mattraks/delete-workflow-runs@main
-        with:
-          token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
-          repository: ${{ github.repository }}
-          retain_days: 3
-        continue-on-error: true
-
-      - name: Delete Older Releases
-        uses: dev-drprasad/delete-older-releases@master
-        with:
-          keep_latest: 3
-          delete_tags: true
         env:
-          GITHUB_TOKEN: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git -c http.extraheader="AUTHORIZATION: bearer $GH_TOKEN" \
+            push origin HEAD:refs/heads/ppdragon16
+
+      # 清理 3 天以前的 Workflow Runs
+      - name: Cleanup Workflow Logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cutoff="$(date -u -d '3 days ago' +%s)"
+
+          gh run list --limit 1000 \
+            --json databaseId,createdAt |
+          jq -r --argjson cutoff "$cutoff" '
+            .[]
+            | select((.createdAt | fromdateiso8601) < $cutoff)
+            | .databaseId
+          ' |
+          while read -r run_id; do
+            [ -n "$run_id" ] || continue
+            echo "Deleting workflow run: $run_id"
+            gh run delete "$run_id" --yes || true
+          done
         continue-on-error: true
 
-      # 由 @master 改为 @v1 tag，解决 "unable to find version master" 的解析报错
+      # 只保留最新 3 个 Release，并删除对应旧 Tag
+      - name: Delete Older Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh release list --limit 100 \
+            --json tagName,publishedAt |
+          jq -r '.[3:][].tagName' |
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Deleting old release and tag: $tag"
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
+        continue-on-error: true
+
+      # 清理 3 天以前的 Artifacts
       - name: Cleanup Old Action Artifacts
         uses: c-hive/gha-remove-artifacts@v1
         with:
