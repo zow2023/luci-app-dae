@@ -1,3 +1,4 @@
+
 name: Build Web
 
 on:
@@ -5,17 +6,22 @@ on:
   schedule:
     - cron: '0 16 * * *'
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: next
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 18
 
@@ -32,21 +38,23 @@ jobs:
 
       - name: Update Makefile
         run: |
+          set -e
           chmod 755 ./dae/files/dae.init
           find ./ -type f -exec dos2unix {} \; -print
 
-          # Fetch commit data ONCE to avoid redundant API requests & rate limits
-          api_response="$(curl -s https://api.github.com/repos/LostAttractor/dae/commits/next)"
-          latest_commit_full="$(echo "$api_response" | jq -r '.sha')"
+          # Fetch commit data ONCE
+          api_response="$(curl -fsSL --retry 3 --retry-delay 2 https://api.github.com/repos/LostAttractor/dae/commits/next)"
+
+          latest_commit_full="$(jq -er '.sha | select(test("^[a-f0-9]{40}$"))' <<< "$api_response")"
           latest_commit="${latest_commit_full:0:7}"
-          
-          committer_date="$(echo "$api_response" | jq -r '.commit.committer.date')"
+
+          committer_date="$(jq -er '.commit.committer.date' <<< "$api_response")"
           latest_core_date="$(echo "$committer_date" | cut -d'T' -f1 | tr '-' '.')"
-          
-          author_date="$(echo "$api_response" | jq -r '.commit.author.date')"
+
+          author_date="$(jq -er '.commit.author.date' <<< "$api_response")"
           formatted_timestamp="$(date --date="$author_date" "+%Y-%m-%d")"
 
-          # Use robust regex replacement instead of brittle line numbers
+          # Update Makefile
           sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$latest_core_date/" ./dae/Makefile
           sed -i "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$latest_commit_full/" ./dae/Makefile
 
@@ -55,9 +63,11 @@ jobs:
       - name: Commit file
         run: |
           rm -rf build
-          git config --global user.email "simonsqiu@foxmail.com"
-          git config --global user.name "SimonsQiu"
+          git config user.email "simonsqiu@foxmail.com"
+          git config user.name "SimonsQiu"
+
           git add -A
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             echo "has_changes=false" >> "$GITHUB_ENV"
@@ -72,12 +82,12 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           branch: next
-          force: true
+          force: false
 
       - name: Cleanup Workflow Logs
         uses: Mattraks/delete-workflow-runs@v2
         with:
-          token: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           retain_days: 3
         continue-on-error: true
@@ -88,7 +98,7 @@ jobs:
           keep_latest: 3
           delete_tags: true
         env:
-          GITHUB_TOKEN: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
       - name: Cleanup Old Action Artifacts
